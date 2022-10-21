@@ -86,7 +86,9 @@ func (c *ssClient) DialTCP(laddr *net.TCPAddr, raddr string) (onet.DuplexConn, e
 		return nil, err
 	}
 	ssw := ss.NewShadowsocksWriter(proxyConn, c.cipher)
-	ssw.SetSaltGenerator(c.salter)
+	if c.salter != nil {
+		ssw.SetSaltGenerator(c.salter)
+	}
 	_, err = ssw.LazyWrite(socksTargetAddr)
 	if err != nil {
 		proxyConn.Close()
