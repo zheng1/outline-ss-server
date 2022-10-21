@@ -40,7 +40,7 @@ func (g prefixSaltGenerator) GetSalt(salt []byte) error {
 //
 // Note: Prefixes steal entropy from the initialization vector. This weakens
 // security by increasing the likelihood that the same IV is used in two
-// different connections (which becomes likely once 2^-N/2 connections are
+// different connections (which becomes likely once 2^(N/2) connections are
 // made, due to the birthday attack).  If an IV is reused, the attacker can
 // not only decrypt the ciphertext of those two connections; they can also
 // easily recover the shadowsocks key and decrypt all other connections to
