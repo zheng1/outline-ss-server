@@ -1,7 +1,10 @@
 # Outline ss-server
-[![Build Status](https://travis-ci.org/Jigsaw-Code/outline-ss-server.svg?branch=master)](https://travis-ci.org/Jigsaw-Code/outline-ss-server)
 
-This repository has the Shadowsocks service used by Outline servers. It uses components from [go-shadowsocks2](https://github.com/shadowsocks/go-shadowsocks2), and adds a number of improvements to meet the needs of the Outline users.
+![Build Status](https://github.com/Jigsaw-Code/outline-ss-server/actions/workflows/go.yml/badge.svg)
+[![Mattermost](https://badgen.net/badge/Mattermost/Outline%20Community/blue)](https://community.internetfreedomfestival.org/community/channels/outline-community)
+[![Reddit](https://badgen.net/badge/Reddit/r%2Foutlinevpn/orange)](https://www.reddit.com/r/outlinevpn/)
+
+This repository has the Shadowsocks service used by Outline servers. It was inspired by [go-shadowsocks2](https://github.com/shadowsocks/go-shadowsocks2), and adds a number of improvements to meet the needs of the Outline users.
 
 The Outline Shadowsocks service allows for:
 - Multiple users on a single port.
@@ -111,13 +114,9 @@ You can mix and match the libev and go servers and clients.
 
 ## Tests and Benchmarks
 
-Before running tests, you should first run
+To run the tests and benchmarks, call:
 ```
-git submodule update --init
-```
-to download test data used by the GeoIP metrics tests.  To run all tests, you can use
-```
-go test -v ./...
+make test
 ```
 
 You can benchmark the cipher finding code with
@@ -147,7 +146,7 @@ Summary:
   ```
 - Build and upload:
   ```bash
-  goreleaser
+  make release
   ```
 - Go to https://github.com/Jigsaw-Code/outline-ss-server/releases, review and publish the release.
 
