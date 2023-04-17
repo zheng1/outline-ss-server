@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Jigsaw-Code/outline-internal-sdk/transport"
 	"github.com/Jigsaw-Code/outline-ss-server/client"
 	onet "github.com/Jigsaw-Code/outline-ss-server/net"
 	"github.com/Jigsaw-Code/outline-ss-server/service"
@@ -111,9 +112,13 @@ func TestTCPEcho(t *testing.T) {
 	}
 	replayCache := service.NewReplayCache(5)
 	const testTimeout = 200 * time.Millisecond
-	proxy := service.NewTCPService(cipherList, &replayCache, &metrics.NoOpMetrics{}, testTimeout)
-	proxy.SetTargetIPValidator(allowAll)
-	go proxy.Serve(proxyListener)
+	handler := service.NewTCPHandler(proxyListener.Addr().(*net.TCPAddr).Port, cipherList, &replayCache, &metrics.NoOpMetrics{}, testTimeout)
+	handler.SetTargetIPValidator(allowAll)
+	done := make(chan struct{})
+	go func() {
+		service.StreamServe(func() (transport.StreamConn, error) { return proxyListener.AcceptTCP() }, handler.Handle)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
 	if err != nil {
@@ -159,7 +164,8 @@ func TestTCPEcho(t *testing.T) {
 	}
 
 	conn.Close()
-	proxy.Stop()
+	proxyListener.Close()
+	<-done
 	echoListener.Close()
 	echoRunning.Wait()
 }
@@ -184,8 +190,12 @@ func TestRestrictedAddresses(t *testing.T) {
 	require.NoError(t, err)
 	const testTimeout = 200 * time.Millisecond
 	testMetrics := &statusMetrics{}
-	proxy := service.NewTCPService(cipherList, nil, testMetrics, testTimeout)
-	go proxy.Serve(proxyListener)
+	handler := service.NewTCPHandler(proxyListener.Addr().(*net.TCPAddr).Port, cipherList, nil, testMetrics, testTimeout)
+	done := make(chan struct{})
+	go func() {
+		service.StreamServe(service.WrapStreamListener(proxyListener.AcceptTCP), handler.Handle)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
 	require.NoError(t, err)
@@ -219,7 +229,8 @@ func TestRestrictedAddresses(t *testing.T) {
 		conn.Close()
 	}
 
-	proxy.GracefulStop()
+	proxyListener.Close()
+	<-done
 	assert.ElementsMatch(t, testMetrics.statuses, expectedStatus)
 }
 
@@ -268,9 +279,13 @@ func TestUDPEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	testMetrics := &fakeUDPMetrics{fakeLocation: "QQ"}
-	proxy := service.NewUDPService(time.Hour, cipherList, testMetrics)
+	proxy := service.NewPacketHandler(time.Hour, cipherList, testMetrics)
 	proxy.SetTargetIPValidator(allowAll)
-	go proxy.Serve(proxyConn)
+	done := make(chan struct{})
+	go func() {
+		proxy.Handle(proxyConn)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
 	if err != nil {
@@ -318,7 +333,8 @@ func TestUDPEcho(t *testing.T) {
 	conn.Close()
 	echoConn.Close()
 	echoRunning.Wait()
-	proxy.GracefulStop()
+	proxyConn.Close()
+	<-done
 	// Verify that the expected metrics were reported.
 	snapshot := cipherList.SnapshotForClientIP(nil)
 	keyID := snapshot[0].Value.(*service.CipherEntry).ID
@@ -365,9 +381,13 @@ func BenchmarkTCPThroughput(b *testing.B) {
 		b.Fatal(err)
 	}
 	const testTimeout = 200 * time.Millisecond
-	proxy := service.NewTCPService(cipherList, nil, &metrics.NoOpMetrics{}, testTimeout)
-	proxy.SetTargetIPValidator(allowAll)
-	go proxy.Serve(proxyListener)
+	handler := service.NewTCPHandler(proxyListener.Addr().(*net.TCPAddr).Port, cipherList, nil, &metrics.NoOpMetrics{}, testTimeout)
+	handler.SetTargetIPValidator(allowAll)
+	done := make(chan struct{})
+	go func() {
+		service.StreamServe(service.WrapStreamListener(proxyListener.AcceptTCP), handler.Handle)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
 	if err != nil {
@@ -392,13 +412,13 @@ func BenchmarkTCPThroughput(b *testing.B) {
 
 	start := time.Now()
 	b.ResetTimer()
-	var running sync.WaitGroup
-	running.Add(1)
+	var clientRunning sync.WaitGroup
+	clientRunning.Add(1)
 	go func() {
 		for i := 0; i < b.N; i++ {
 			conn.Write(up)
 		}
-		running.Done()
+		clientRunning.Done()
 	}()
 
 	for i := 0; i < b.N; i++ {
@@ -411,9 +431,10 @@ func BenchmarkTCPThroughput(b *testing.B) {
 	b.ReportMetric(megabits/elapsed.Seconds(), "mbps")
 
 	conn.Close()
-	proxy.Stop()
+	proxyListener.Close()
+	<-done
 	echoListener.Close()
-	running.Wait()
+	clientRunning.Wait()
 	echoRunning.Wait()
 }
 
@@ -432,9 +453,13 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 	}
 	replayCache := service.NewReplayCache(service.MaxCapacity)
 	const testTimeout = 200 * time.Millisecond
-	proxy := service.NewTCPService(cipherList, &replayCache, &metrics.NoOpMetrics{}, testTimeout)
-	proxy.SetTargetIPValidator(allowAll)
-	go proxy.Serve(proxyListener)
+	handler := service.NewTCPHandler(proxyListener.Addr().(*net.TCPAddr).Port, cipherList, &replayCache, &metrics.NoOpMetrics{}, testTimeout)
+	handler.SetTargetIPValidator(allowAll)
+	done := make(chan struct{})
+	go func() {
+		service.StreamServe(service.WrapStreamListener(proxyListener.AcceptTCP), handler.Handle)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
 	if err != nil {
@@ -492,7 +517,8 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 	}
 	wg.Wait()
 
-	proxy.Stop()
+	proxyListener.Close()
+	<-done
 	echoListener.Close()
 	echoRunning.Wait()
 }
@@ -509,9 +535,13 @@ func BenchmarkUDPEcho(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	proxy := service.NewUDPService(time.Hour, cipherList, &metrics.NoOpMetrics{})
+	proxy := service.NewPacketHandler(time.Hour, cipherList, &metrics.NoOpMetrics{})
 	proxy.SetTargetIPValidator(allowAll)
-	go proxy.Serve(proxyConn)
+	done := make(chan struct{})
+	go func() {
+		proxy.Handle(proxyConn)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
 	if err != nil {
@@ -540,7 +570,8 @@ func BenchmarkUDPEcho(b *testing.B) {
 	b.StopTimer()
 
 	conn.Close()
-	proxy.Stop()
+	require.Nil(b, proxyConn.Close())
+	<-done
 	echoConn.Close()
 	echoRunning.Wait()
 }
@@ -558,9 +589,13 @@ func BenchmarkUDPManyKeys(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	proxy := service.NewUDPService(time.Hour, cipherList, &metrics.NoOpMetrics{})
+	proxy := service.NewPacketHandler(time.Hour, cipherList, &metrics.NoOpMetrics{})
 	proxy.SetTargetIPValidator(allowAll)
-	go proxy.Serve(proxyConn)
+	done := make(chan struct{})
+	go func() {
+		proxy.Handle(proxyConn)
+		done <- struct{}{}
+	}()
 
 	proxyHost, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
 	if err != nil {
@@ -591,7 +626,8 @@ func BenchmarkUDPManyKeys(b *testing.B) {
 		conn.ReadFrom(buf)
 	}
 	b.StopTimer()
-	proxy.Stop()
+	require.Nil(b, proxyConn.Close())
+	<-done
 	echoConn.Close()
 	echoRunning.Wait()
 }

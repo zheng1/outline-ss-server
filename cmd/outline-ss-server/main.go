@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Jigsaw-Code/outline-internal-sdk/transport"
 	"github.com/Jigsaw-Code/outline-ss-server/service"
 	"github.com/Jigsaw-Code/outline-ss-server/service/metrics"
 	ss "github.com/Jigsaw-Code/outline-ss-server/shadowsocks"
@@ -61,9 +62,9 @@ func init() {
 }
 
 type ssPort struct {
-	tcpService service.TCPService
-	udpService service.UDPService
-	cipherList service.CipherList
+	tcpListener *net.TCPListener
+	packetConn  net.PacketConn
+	cipherList  service.CipherList
 }
 
 type SSServer struct {
@@ -84,13 +85,20 @@ func (s *SSServer) startPort(portNum int) error {
 		return fmt.Errorf("Shadowsocks UDP service failed to start on port %v: %w", portNum, err)
 	}
 	logger.Infof("Shadowsocks UDP service listening on %v", packetConn.LocalAddr().String())
-	port := &ssPort{cipherList: service.NewCipherList()}
+	port := &ssPort{tcpListener: listener, packetConn: packetConn, cipherList: service.NewCipherList()}
 	// TODO: Register initial data metrics at zero.
-	port.tcpService = service.NewTCPService(port.cipherList, &s.replayCache, s.m, tcpReadTimeout)
-	port.udpService = service.NewUDPService(s.natTimeout, port.cipherList, s.m)
+	tcpHandler := service.NewTCPHandler(portNum, port.cipherList, &s.replayCache, s.m, tcpReadTimeout)
+	packetHandler := service.NewPacketHandler(s.natTimeout, port.cipherList, s.m)
 	s.ports[portNum] = port
-	go port.tcpService.Serve(listener)
-	go port.udpService.Serve(packetConn)
+	accept := func() (transport.StreamConn, error) {
+		conn, err := listener.AcceptTCP()
+		if err == nil {
+			conn.SetKeepAlive(true)
+		}
+		return conn, err
+	}
+	go service.StreamServe(accept, tcpHandler.Handle)
+	go packetHandler.Handle(port.packetConn)
 	return nil
 }
 
@@ -99,8 +107,8 @@ func (s *SSServer) removePort(portNum int) error {
 	if !ok {
 		return fmt.Errorf("port %v doesn't exist", portNum)
 	}
-	tcpErr := port.tcpService.Stop()
-	udpErr := port.udpService.Stop()
+	tcpErr := port.tcpListener.Close()
+	udpErr := port.packetConn.Close()
 	delete(s.ports, portNum)
 	if tcpErr != nil {
 		return fmt.Errorf("Shadowsocks TCP service on port %v failed to stop: %w", portNum, tcpErr)
