@@ -16,19 +16,19 @@ package integration_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Jigsaw-Code/outline-internal-sdk/transport"
-	"github.com/Jigsaw-Code/outline-ss-server/client"
+	"github.com/Jigsaw-Code/outline-internal-sdk/transport/shadowsocks"
 	onet "github.com/Jigsaw-Code/outline-ss-server/net"
 	"github.com/Jigsaw-Code/outline-ss-server/service"
 	"github.com/Jigsaw-Code/outline-ss-server/service/metrics"
-	ss "github.com/Jigsaw-Code/outline-ss-server/shadowsocks"
+	sstest "github.com/Jigsaw-Code/outline-ss-server/shadowsocks"
 	logging "github.com/op/go-logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,7 +105,7 @@ func TestTCPEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenTCP failed: %v", err)
 	}
-	secrets := ss.MakeTestSecrets(1)
+	secrets := []string{"secret"}
 	cipherList, err := service.MakeTestCiphers(secrets)
 	if err != nil {
 		t.Fatal(err)
@@ -120,22 +120,12 @@ func TestTCPEcho(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	portNum, err := strconv.Atoi(proxyPort)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := client.NewClient(proxyHost, portNum, secrets[0], ss.TestCipher)
-	if err != nil {
-		t.Fatalf("Failed to create ShadowsocksClient: %v", err)
-	}
-	conn, err := client.DialTCP(nil, echoListener.Addr().String())
-	if err != nil {
-		t.Fatalf("ShadowsocksClient.DialTCP failed: %v", err)
-	}
+	cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[0])
+	require.NoError(t, err)
+	client, err := shadowsocks.NewStreamDialer(&transport.TCPEndpoint{Address: proxyListener.Addr().String()}, cryptoKey)
+	require.NoError(t, err)
+	conn, err := client.Dial(context.Background(), echoListener.Addr().String())
+	require.NoError(t, err)
 
 	const N = 1000
 	up := make([]byte, N)
@@ -176,7 +166,7 @@ type statusMetrics struct {
 	statuses []string
 }
 
-func (m *statusMetrics) AddClosedTCPConnection(clientLocation metrics.CountryCode, accessKey, status string, data metrics.ProxyMetrics, duration time.Duration) {
+func (m *statusMetrics) AddClosedTCPConnection(clientInfo metrics.ClientInfo, accessKey, status string, data metrics.ProxyMetrics, duration time.Duration) {
 	m.Lock()
 	m.statuses = append(m.statuses, status)
 	m.Unlock()
@@ -185,7 +175,7 @@ func (m *statusMetrics) AddClosedTCPConnection(clientLocation metrics.CountryCod
 func TestRestrictedAddresses(t *testing.T) {
 	proxyListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	require.NoError(t, err, "ListenTCP failed: %v", err)
-	secrets := ss.MakeTestSecrets(1)
+	secrets := []string{"secret"}
 	cipherList, err := service.MakeTestCiphers(secrets)
 	require.NoError(t, err)
 	const testTimeout = 200 * time.Millisecond
@@ -197,11 +187,9 @@ func TestRestrictedAddresses(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
+	cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[0])
 	require.NoError(t, err)
-	portNum, err := strconv.Atoi(proxyPort)
-	require.NoError(t, err)
-	client, err := client.NewClient(proxyHost, portNum, secrets[0], ss.TestCipher)
+	dialer, err := shadowsocks.NewStreamDialer(&transport.TCPEndpoint{Address: proxyListener.Addr().String()}, cryptoKey)
 	require.NoError(t, err, "Failed to create ShadowsocksClient")
 
 	buf := make([]byte, 10)
@@ -221,7 +209,7 @@ func TestRestrictedAddresses(t *testing.T) {
 	}
 
 	for _, address := range addresses {
-		conn, err := client.DialTCP(nil, address)
+		conn, err := dialer.Dial(context.Background(), address)
 		require.NoError(t, err, "Failed to dial %v", address)
 		n, err := conn.Read(buf)
 		assert.Equal(t, 0, n, "Server should close without replying on rejected address")
@@ -236,7 +224,7 @@ func TestRestrictedAddresses(t *testing.T) {
 
 // Metrics about one UDP packet.
 type udpRecord struct {
-	location          metrics.CountryCode
+	clientInfo        metrics.ClientInfo
 	accessKey, status string
 	in, out           int
 }
@@ -244,19 +232,21 @@ type udpRecord struct {
 // Fake metrics implementation for UDP
 type fakeUDPMetrics struct {
 	metrics.ShadowsocksMetrics
-	fakeLocation metrics.CountryCode
-	up, down     []udpRecord
-	natAdded     int
+	fakeInfo metrics.ClientInfo
+	up, down []udpRecord
+	natAdded int
 }
 
-func (m *fakeUDPMetrics) GetLocation(addr net.Addr) (metrics.CountryCode, error) {
-	return m.fakeLocation, nil
+var _ metrics.ShadowsocksMetrics = (*fakeUDPMetrics)(nil)
+
+func (m *fakeUDPMetrics) GetClientInfo(addr net.Addr) (metrics.ClientInfo, error) {
+	return m.fakeInfo, nil
 }
-func (m *fakeUDPMetrics) AddUDPPacketFromClient(clientLocation metrics.CountryCode, accessKey, status string, clientProxyBytes, proxyTargetBytes int) {
-	m.up = append(m.up, udpRecord{clientLocation, accessKey, status, clientProxyBytes, proxyTargetBytes})
+func (m *fakeUDPMetrics) AddUDPPacketFromClient(clientInfo metrics.ClientInfo, accessKey, status string, clientProxyBytes, proxyTargetBytes int) {
+	m.up = append(m.up, udpRecord{clientInfo, accessKey, status, clientProxyBytes, proxyTargetBytes})
 }
-func (m *fakeUDPMetrics) AddUDPPacketFromTarget(clientLocation metrics.CountryCode, accessKey, status string, targetProxyBytes, proxyClientBytes int) {
-	m.down = append(m.down, udpRecord{clientLocation, accessKey, status, targetProxyBytes, proxyClientBytes})
+func (m *fakeUDPMetrics) AddUDPPacketFromTarget(clientInfo metrics.ClientInfo, accessKey, status string, targetProxyBytes, proxyClientBytes int) {
+	m.down = append(m.down, udpRecord{clientInfo, accessKey, status, targetProxyBytes, proxyClientBytes})
 }
 func (m *fakeUDPMetrics) AddUDPNatEntry() {
 	m.natAdded++
@@ -273,12 +263,12 @@ func TestUDPEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenTCP failed: %v", err)
 	}
-	secrets := ss.MakeTestSecrets(1)
+	secrets := []string{"secret"}
 	cipherList, err := service.MakeTestCiphers(secrets)
 	if err != nil {
 		t.Fatal(err)
 	}
-	testMetrics := &fakeUDPMetrics{fakeLocation: "QQ"}
+	testMetrics := &fakeUDPMetrics{fakeInfo: metrics.ClientInfo{CountryCode: "QQ"}}
 	proxy := service.NewPacketHandler(time.Hour, cipherList, testMetrics)
 	proxy.SetTargetIPValidator(allowAll)
 	done := make(chan struct{})
@@ -287,25 +277,15 @@ func TestUDPEcho(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	portNum, err := strconv.Atoi(proxyPort)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := client.NewClient(proxyHost, portNum, secrets[0], ss.TestCipher)
-	if err != nil {
-		t.Fatalf("Failed to create ShadowsocksClient: %v", err)
-	}
-	conn, err := client.ListenUDP(nil)
-	if err != nil {
-		t.Fatalf("ShadowsocksClient.ListenUDP failed: %v", err)
-	}
+	cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[0])
+	require.NoError(t, err)
+	client, err := shadowsocks.NewPacketListener(&transport.UDPEndpoint{Address: proxyConn.LocalAddr().String()}, cryptoKey)
+	require.NoError(t, err)
+	conn, err := client.ListenPacket(context.Background())
+	require.NoError(t, err)
 
 	const N = 1000
-	up := ss.MakeTestPayload(N)
+	up := sstest.MakeTestPayload(N)
 	n, err := conn.WriteTo(up, echoConn.LocalAddr())
 	if err != nil {
 		t.Fatal(err)
@@ -346,7 +326,7 @@ func TestUDPEcho(t *testing.T) {
 		t.Errorf("Wrong number of packets sent: %v", testMetrics.up)
 	} else {
 		record := testMetrics.up[0]
-		if record.location != "QQ" ||
+		if record.clientInfo.CountryCode != "QQ" ||
 			record.accessKey != keyID ||
 			record.status != "OK" ||
 			record.in <= record.out ||
@@ -358,7 +338,7 @@ func TestUDPEcho(t *testing.T) {
 		t.Errorf("Wrong number of packets received: %v", testMetrics.down)
 	} else {
 		record := testMetrics.down[0]
-		if record.location != "QQ" ||
+		if record.clientInfo.CountryCode != "QQ" ||
 			record.accessKey != keyID ||
 			record.status != "OK" ||
 			record.in != N ||
@@ -375,7 +355,7 @@ func BenchmarkTCPThroughput(b *testing.B) {
 	if err != nil {
 		b.Fatalf("ListenTCP failed: %v", err)
 	}
-	secrets := ss.MakeTestSecrets(1)
+	secrets := []string{"secret"}
 	cipherList, err := service.MakeTestCiphers(secrets)
 	if err != nil {
 		b.Fatal(err)
@@ -389,25 +369,15 @@ func BenchmarkTCPThroughput(b *testing.B) {
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	portNum, err := strconv.Atoi(proxyPort)
-	if err != nil {
-		b.Fatal(err)
-	}
-	client, err := client.NewClient(proxyHost, portNum, secrets[0], ss.TestCipher)
-	if err != nil {
-		b.Fatalf("Failed to create ShadowsocksClient: %v", err)
-	}
-	conn, err := client.DialTCP(nil, echoListener.Addr().String())
-	if err != nil {
-		b.Fatalf("ShadowsocksClient.DialTCP failed: %v", err)
-	}
+	cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[0])
+	require.NoError(b, err)
+	client, err := shadowsocks.NewStreamDialer(&transport.TCPEndpoint{Address: proxyListener.Addr().String()}, cryptoKey)
+	require.NoError(b, err)
+	conn, err := client.Dial(context.Background(), echoListener.Addr().String())
+	require.NoError(b, err)
 
 	const N = 1000
-	up := ss.MakeTestPayload(N)
+	up := sstest.MakeTestPayload(N)
 	down := make([]byte, N)
 
 	start := time.Now()
@@ -425,7 +395,7 @@ func BenchmarkTCPThroughput(b *testing.B) {
 		conn.Read(down)
 	}
 	b.StopTimer()
-	elapsed := time.Now().Sub(start)
+	elapsed := time.Since(start)
 
 	megabits := float64(8*1000*b.N) / 1e6
 	b.ReportMetric(megabits/elapsed.Seconds(), "mbps")
@@ -446,7 +416,7 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 		b.Fatalf("ListenTCP failed: %v", err)
 	}
 	const numKeys = 50
-	secrets := ss.MakeTestSecrets(numKeys)
+	secrets := sstest.MakeTestSecrets(numKeys)
 	cipherList, err := service.MakeTestCiphers(secrets)
 	if err != nil {
 		b.Fatal(err)
@@ -461,21 +431,12 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyListener.Addr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	portNum, err := strconv.Atoi(proxyPort)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	var clients [numKeys]client.Client
+	var clients [numKeys]*shadowsocks.StreamDialer
 	for i := 0; i < numKeys; i++ {
-		clients[i], err = client.NewClient(proxyHost, portNum, secrets[i], ss.TestCipher)
-		if err != nil {
-			b.Fatalf("Failed to create ShadowsocksClient: %v", err)
-		}
+		cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[i])
+		require.NoError(b, err)
+		clients[i], err = shadowsocks.NewStreamDialer(&transport.TCPEndpoint{Address: proxyListener.Addr().String()}, cryptoKey)
+		require.NoError(b, err)
 	}
 
 	b.ResetTimer()
@@ -490,7 +451,7 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < k; i++ {
-				conn, err := client.DialTCP(nil, echoListener.Addr().String())
+				conn, err := client.Dial(context.Background(), echoListener.Addr().String())
 				if err != nil {
 					b.Errorf("ShadowsocksClient.DialTCP failed: %v", err)
 				}
@@ -526,11 +487,11 @@ func BenchmarkTCPMultiplexing(b *testing.B) {
 func BenchmarkUDPEcho(b *testing.B) {
 	echoConn, echoRunning := startUDPEchoServer(b)
 
-	proxyConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		b.Fatalf("ListenTCP failed: %v", err)
 	}
-	secrets := ss.MakeTestSecrets(1)
+	secrets := []string{"secret"}
 	cipherList, err := service.MakeTestCiphers(secrets)
 	if err != nil {
 		b.Fatal(err)
@@ -539,26 +500,16 @@ func BenchmarkUDPEcho(b *testing.B) {
 	proxy.SetTargetIPValidator(allowAll)
 	done := make(chan struct{})
 	go func() {
-		proxy.Handle(proxyConn)
+		proxy.Handle(server)
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	portNum, err := strconv.Atoi(proxyPort)
-	if err != nil {
-		b.Fatal(err)
-	}
-	client, err := client.NewClient(proxyHost, portNum, secrets[0], ss.TestCipher)
-	if err != nil {
-		b.Fatalf("Failed to create ShadowsocksClient: %v", err)
-	}
-	conn, err := client.ListenUDP(nil)
-	if err != nil {
-		b.Fatalf("ShadowsocksClient.ListenUDP failed: %v", err)
-	}
+	cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[0])
+	require.NoError(b, err)
+	client, err := shadowsocks.NewPacketListener(&transport.UDPEndpoint{Address: server.LocalAddr().String()}, cryptoKey)
+	require.NoError(b, err)
+	conn, err := client.ListenPacket(context.Background())
+	require.NoError(b, err)
 
 	const N = 1000
 	buf := make([]byte, N)
@@ -569,8 +520,8 @@ func BenchmarkUDPEcho(b *testing.B) {
 	}
 	b.StopTimer()
 
-	conn.Close()
-	require.Nil(b, proxyConn.Close())
+	require.NoError(b, conn.Close())
+	require.Nil(b, server.Close())
 	<-done
 	echoConn.Close()
 	echoRunning.Wait()
@@ -584,7 +535,7 @@ func BenchmarkUDPManyKeys(b *testing.B) {
 		b.Fatalf("ListenTCP failed: %v", err)
 	}
 	const numKeys = 100
-	secrets := ss.MakeTestSecrets(numKeys)
+	secrets := sstest.MakeTestSecrets(numKeys)
 	cipherList, err := service.MakeTestCiphers(secrets)
 	if err != nil {
 		b.Fatal(err)
@@ -597,27 +548,19 @@ func BenchmarkUDPManyKeys(b *testing.B) {
 		done <- struct{}{}
 	}()
 
-	proxyHost, proxyPort, err := net.SplitHostPort(proxyConn.LocalAddr().String())
-	if err != nil {
-		b.Fatal(err)
-	}
-	portNum, err := strconv.Atoi(proxyPort)
-	if err != nil {
-		b.Fatal(err)
-	}
-	var clients [numKeys]client.Client
+	var clients [numKeys]transport.PacketListener
 	for i := 0; i < numKeys; i++ {
-		clients[i], err = client.NewClient(proxyHost, portNum, secrets[i], ss.TestCipher)
-		if err != nil {
-			b.Fatalf("Failed to create ShadowsocksClient: %v", err)
-		}
+		cryptoKey, err := shadowsocks.NewEncryptionKey(shadowsocks.CHACHA20IETFPOLY1305, secrets[i])
+		require.NoError(b, err)
+		clients[i], err = shadowsocks.NewPacketListener(&transport.UDPEndpoint{Address: proxyConn.LocalAddr().String()}, cryptoKey)
+		require.NoError(b, err)
 	}
 
 	const N = 1000
 	buf := make([]byte, N)
 	conns := make([]net.PacketConn, len(clients))
 	for i, client := range clients {
-		conns[i], _ = client.ListenUDP(nil)
+		conns[i], _ = client.ListenPacket(context.Background())
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
