@@ -25,6 +25,7 @@ import (
 
 	"github.com/Jigsaw-Code/outline-internal-sdk/transport"
 	"github.com/Jigsaw-Code/outline-internal-sdk/transport/shadowsocks"
+	"github.com/Jigsaw-Code/outline-ss-server/ipinfo"
 	onet "github.com/Jigsaw-Code/outline-ss-server/net"
 	"github.com/Jigsaw-Code/outline-ss-server/service"
 	"github.com/Jigsaw-Code/outline-ss-server/service/metrics"
@@ -166,7 +167,7 @@ type statusMetrics struct {
 	statuses []string
 }
 
-func (m *statusMetrics) AddClosedTCPConnection(clientInfo metrics.ClientInfo, accessKey, status string, data metrics.ProxyMetrics, duration time.Duration) {
+func (m *statusMetrics) AddClosedTCPConnection(clientInfo ipinfo.IPInfo, accessKey, status string, data metrics.ProxyMetrics, duration time.Duration) {
 	m.Lock()
 	m.statuses = append(m.statuses, status)
 	m.Unlock()
@@ -224,7 +225,7 @@ func TestRestrictedAddresses(t *testing.T) {
 
 // Metrics about one UDP packet.
 type udpRecord struct {
-	clientInfo        metrics.ClientInfo
+	clientInfo        ipinfo.IPInfo
 	accessKey, status string
 	in, out           int
 }
@@ -232,20 +233,19 @@ type udpRecord struct {
 // Fake metrics implementation for UDP
 type fakeUDPMetrics struct {
 	metrics.ShadowsocksMetrics
-	fakeInfo metrics.ClientInfo
 	up, down []udpRecord
 	natAdded int
 }
 
 var _ metrics.ShadowsocksMetrics = (*fakeUDPMetrics)(nil)
 
-func (m *fakeUDPMetrics) GetClientInfo(addr net.Addr) (metrics.ClientInfo, error) {
-	return m.fakeInfo, nil
+func (m *fakeUDPMetrics) GetIPInfo(ip net.IP) (ipinfo.IPInfo, error) {
+	return ipinfo.IPInfo{CountryCode: "QQ"}, nil
 }
-func (m *fakeUDPMetrics) AddUDPPacketFromClient(clientInfo metrics.ClientInfo, accessKey, status string, clientProxyBytes, proxyTargetBytes int) {
+func (m *fakeUDPMetrics) AddUDPPacketFromClient(clientInfo ipinfo.IPInfo, accessKey, status string, clientProxyBytes, proxyTargetBytes int) {
 	m.up = append(m.up, udpRecord{clientInfo, accessKey, status, clientProxyBytes, proxyTargetBytes})
 }
-func (m *fakeUDPMetrics) AddUDPPacketFromTarget(clientInfo metrics.ClientInfo, accessKey, status string, targetProxyBytes, proxyClientBytes int) {
+func (m *fakeUDPMetrics) AddUDPPacketFromTarget(clientInfo ipinfo.IPInfo, accessKey, status string, targetProxyBytes, proxyClientBytes int) {
 	m.down = append(m.down, udpRecord{clientInfo, accessKey, status, targetProxyBytes, proxyClientBytes})
 }
 func (m *fakeUDPMetrics) AddUDPNatEntry() {
@@ -268,7 +268,7 @@ func TestUDPEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testMetrics := &fakeUDPMetrics{fakeInfo: metrics.ClientInfo{CountryCode: "QQ"}}
+	testMetrics := &fakeUDPMetrics{}
 	proxy := service.NewPacketHandler(time.Hour, cipherList, testMetrics)
 	proxy.SetTargetIPValidator(allowAll)
 	done := make(chan struct{})
@@ -326,7 +326,8 @@ func TestUDPEcho(t *testing.T) {
 		t.Errorf("Wrong number of packets sent: %v", testMetrics.up)
 	} else {
 		record := testMetrics.up[0]
-		if record.clientInfo.CountryCode != "QQ" ||
+		require.Equal(t, "XL", record.clientInfo.CountryCode.String())
+		if record.clientInfo.CountryCode != "XL" ||
 			record.accessKey != keyID ||
 			record.status != "OK" ||
 			record.in <= record.out ||
@@ -338,7 +339,7 @@ func TestUDPEcho(t *testing.T) {
 		t.Errorf("Wrong number of packets received: %v", testMetrics.down)
 	} else {
 		record := testMetrics.down[0]
-		if record.clientInfo.CountryCode != "QQ" ||
+		if record.clientInfo.CountryCode != "XL" ||
 			record.accessKey != keyID ||
 			record.status != "OK" ||
 			record.in != N ||
