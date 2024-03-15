@@ -144,7 +144,7 @@ func NewTCPHandler(port int, ciphers CipherList, replayCache *ReplayCache, m TCP
 var defaultDialer = makeValidatingTCPStreamDialer(onet.RequirePublicIP)
 
 func makeValidatingTCPStreamDialer(targetIPValidator onet.TargetIPValidator) transport.StreamDialer {
-	return &transport.TCPStreamDialer{Dialer: net.Dialer{Control: func(network, address string, c syscall.RawConn) error {
+	return &transport.TCPDialer{Dialer: net.Dialer{Control: func(network, address string, c syscall.RawConn) error {
 		ip, _, _ := net.SplitHostPort(address)
 		return targetIPValidator(net.ParseIP(ip))
 	}}}
@@ -283,7 +283,7 @@ func (h *tcpHandler) handleConnection(ctx context.Context, listenerPort int, cli
 		io.Copy(io.Discard, clientConn)
 		return id, onet.NewConnectionError("ERR_READ_ADDRESS", "Failed to get target address", err)
 	}
-	tgtConn, dialErr := h.dialer.Dial(ctx, tgtAddr.String())
+	tgtConn, dialErr := h.dialer.DialStream(ctx, tgtAddr.String())
 	if dialErr != nil {
 		// We don't drain so dial errors and invalid addresses are communicated quickly.
 		return id, ensureConnectionError(dialErr, "ERR_CONNECT", "Failed to connect to target")
