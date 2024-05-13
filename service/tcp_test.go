@@ -21,6 +21,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func BenchmarkTCPFindCipherFail(b *testing.B) {
 		if err != nil {
 			b.Fatalf("AcceptTCP failed: %v", err)
 		}
-		clientIP := clientConn.RemoteAddr().(*net.TCPAddr).IP
+		clientIP := clientConn.RemoteAddr().(*net.TCPAddr).AddrPort().Addr()
 		b.StartTimer()
 		findAccessKey(clientConn, clientIP, cipherList)
 		b.StopTimer()
@@ -191,16 +192,16 @@ func BenchmarkTCPFindCipherRepeat(b *testing.B) {
 		b.Fatal(err)
 	}
 	cipherEntries := [numCiphers]*CipherEntry{}
-	snapshot := cipherList.SnapshotForClientIP(nil)
+	snapshot := cipherList.SnapshotForClientIP(netip.Addr{})
 	for cipherNumber, element := range snapshot {
 		cipherEntries[cipherNumber] = element.Value.(*CipherEntry)
 	}
 	for n := 0; n < b.N; n++ {
 		cipherNumber := byte(n % numCiphers)
 		reader, writer := io.Pipe()
-		clientIP := net.IPv4(192, 0, 2, cipherNumber)
-		addr := &net.TCPAddr{IP: clientIP, Port: 54321}
-		c := conn{clientAddr: addr, reader: reader, writer: writer}
+		clientIP := netip.AddrFrom4([4]byte{192, 0, 2, cipherNumber})
+		addr := netip.AddrPortFrom(clientIP, 54321)
+		c := conn{clientAddr: net.TCPAddrFromAddrPort(addr), reader: reader, writer: writer}
 		cipher := cipherEntries[cipherNumber].CryptoKey
 		go shadowsocks.NewWriter(writer, cipher).Write(makeTestPayload(50))
 		b.StartTimer()
@@ -345,7 +346,7 @@ func makeClientBytesCoalesced(t *testing.T, cryptoKey *shadowsocks.EncryptionKey
 }
 
 func firstCipher(cipherList CipherList) *shadowsocks.EncryptionKey {
-	snapshot := cipherList.SnapshotForClientIP(nil)
+	snapshot := cipherList.SnapshotForClientIP(netip.Addr{})
 	cipherEntry := snapshot[0].Value.(*CipherEntry)
 	return cipherEntry.CryptoKey
 }
@@ -368,7 +369,6 @@ func TestProbeClientBytesBasicTruncated(t *testing.T) {
 	discardListener, discardWait := startDiscardServer(t)
 	initialBytes := makeClientBytesBasic(t, cipher, discardListener.Addr().String())
 	for numBytesToSend := 0; numBytesToSend < len(initialBytes); numBytesToSend++ {
-		t.Logf("Sending %v bytes", numBytesToSend)
 		bytesToSend := initialBytes[:numBytesToSend]
 		err := probe(listener.Addr().(*net.TCPAddr), bytesToSend)
 		require.NoError(t, err, "Failed for %v bytes sent: %v", numBytesToSend, err)
@@ -405,7 +405,6 @@ func TestProbeClientBytesBasicModified(t *testing.T) {
 	initialBytes := makeClientBytesBasic(t, cipher, discardListener.Addr().String())
 	bytesToSend := make([]byte, len(initialBytes))
 	for byteToModify := 0; byteToModify < len(initialBytes); byteToModify++ {
-		t.Logf("Modifying byte %v", byteToModify)
 		copy(bytesToSend, initialBytes)
 		bytesToSend[byteToModify] = 255 - bytesToSend[byteToModify]
 		err := probe(listener.Addr().(*net.TCPAddr), bytesToSend)
@@ -442,7 +441,6 @@ func TestProbeClientBytesCoalescedModified(t *testing.T) {
 	initialBytes := makeClientBytesCoalesced(t, cipher, discardListener.Addr().String())
 	bytesToSend := make([]byte, len(initialBytes))
 	for byteToModify := 0; byteToModify < len(initialBytes); byteToModify++ {
-		t.Logf("Modifying byte %v", byteToModify)
 		copy(bytesToSend, initialBytes)
 		bytesToSend[byteToModify] = 255 - bytesToSend[byteToModify]
 		err := probe(listener.Addr().(*net.TCPAddr), bytesToSend)
@@ -506,7 +504,7 @@ func TestReplayDefense(t *testing.T) {
 	const testTimeout = 200 * time.Millisecond
 	authFunc := NewShadowsocksStreamAuthenticator(cipherList, &replayCache, testMetrics)
 	handler := NewTCPHandler(listener.Addr().(*net.TCPAddr).Port, authFunc, testMetrics, testTimeout)
-	snapshot := cipherList.SnapshotForClientIP(nil)
+	snapshot := cipherList.SnapshotForClientIP(netip.Addr{})
 	cipherEntry := snapshot[0].Value.(*CipherEntry)
 	cipher := cipherEntry.CryptoKey
 	reader, writer := io.Pipe()
@@ -585,7 +583,7 @@ func TestReverseReplayDefense(t *testing.T) {
 	const testTimeout = 200 * time.Millisecond
 	authFunc := NewShadowsocksStreamAuthenticator(cipherList, &replayCache, testMetrics)
 	handler := NewTCPHandler(listener.Addr().(*net.TCPAddr).Port, authFunc, testMetrics, testTimeout)
-	snapshot := cipherList.SnapshotForClientIP(nil)
+	snapshot := cipherList.SnapshotForClientIP(netip.Addr{})
 	cipherEntry := snapshot[0].Value.(*CipherEntry)
 	cipher := cipherEntry.CryptoKey
 	reader, writer := io.Pipe()
