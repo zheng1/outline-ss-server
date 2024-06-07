@@ -90,6 +90,7 @@ func findAccessKey(clientReader io.Reader, clientIP netip.Addr, cipherList Ciphe
 	timeToCipher := time.Since(findStartTime)
 	if entry == nil {
 		// TODO: Ban and log client IPs with too many failures too quick to protect against DoS.
+		logger.Warningf("Could not find valid TCP cipher for client %s", clientIP)
 		return nil, clientReader, nil, timeToCipher, fmt.Errorf("could not find valid TCP cipher")
 	}
 

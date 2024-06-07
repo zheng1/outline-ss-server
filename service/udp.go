@@ -81,6 +81,7 @@ func findAccessKeyUDP(clientIP netip.Addr, dst, src []byte, cipherList CipherLis
 		cipherList.MarkUsedByClientIP(entry, clientIP)
 		return buf, id, cryptoKey, nil
 	}
+	logger.Warningf("Could not find valid UDP cipher for client %s", clientIP)
 	return nil, "", nil, errors.New("could not find valid UDP cipher")
 }
 
