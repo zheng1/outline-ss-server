@@ -139,7 +139,7 @@ func (c *tunnelTimeCollector) stopConnection(ipKey IPKey) {
 	defer c.mu.Unlock()
 	client, exists := c.activeClients[ipKey]
 	if !exists {
-		logger.Warningf("Failed to find active client")
+		logger.Warningf("Failed to find active client for IP %s", ipKey)
 		return
 	}
 	client.connCount--
